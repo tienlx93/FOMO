@@ -2,13 +2,14 @@ import streamlit as st
 import os
 from openai import AzureOpenAI
 from dotenv import load_dotenv
-import io
 import json
-import re
 from datetime import datetime
+import chromadb
+import tiktoken
 
 from audio_player import create_audio_player
 from tts import load_tts, speak
+from rag import ChromaVectorStore, ChromaConfig
 
 # Load environment variables from .env file
 load_dotenv()
@@ -111,6 +112,14 @@ if "tts_playing" not in st.session_state:
     st.session_state.tts_playing = {}
 if "tts_last_clicked" not in st.session_state:
     st.session_state.tts_last_clicked = None
+if 'chroma_client' not in st.session_state:
+    st.session_state.chroma_client = None
+if 'chroma_collection' not in st.session_state:
+    st.session_state.chroma_collection = None
+if 'chromadb_config' not in st.session_state:
+    st.session_state.chromadb_config = None
+if 'chroma_vector_store' not in st.session_state:
+    st.session_state.chroma_vector_store = None
 
 def initialize_client():
     """Initialize Azure OpenAI client with error handling"""
@@ -132,6 +141,179 @@ def initialize_client():
     except Exception as e:
         st.error(f"❌ Failed to initialize Azure OpenAI client: {str(e)}")
         return None
+
+def initialize_chromadb(use_cloud=False, api_key="", tenant="", database=""):
+    """Initialize ChromaDB client and collection for semantic search
+    
+    Args:
+        use_cloud: If True, use CloudClient with authentication
+        api_key: API key for CloudClient authentication
+        tenant: Tenant ID for CloudClient
+        database: Database name for CloudClient
+    """
+    try:
+        if use_cloud:
+            # Connect to ChromaDB Cloud with authentication
+            if not api_key or not tenant or not database:
+                print("⚠️ Cloud mode requires API key, tenant, and database")
+                return None, None, None
+            
+            client = chromadb.CloudClient(
+                api_key=api_key,
+                tenant=tenant,
+                database=database
+            )
+            print(f"☁️ Connecting to ChromaDB Cloud (tenant: {tenant}, database: {database})...")
+            
+            # Test connection
+            try:
+                client.heartbeat()
+            except Exception as e:
+                print(f"⚠️ ChromaDB connection test failed: {str(e)}")
+                print(f"💡 Check your cloud credentials and network connection")
+                return None, None, None
+            
+            # Create or get collection with auto-embedding
+            collection = client.get_or_create_collection(
+                name="user_guide_docs",
+                metadata={"hnsw:space": "cosine"}
+            )
+            
+            print(f"✅ ChromaDB Cloud connected: {tenant}/{database}")
+            return client, collection, None
+            
+        else:
+            # Use local ChromaVectorStore from rag module
+            config = ChromaConfig(
+                persist_dir=".chroma",
+                collection_name="user_guide_docs",
+                metadata={"hnsw:space": "cosine"}
+            )
+            vector_store = ChromaVectorStore(config)
+            print(f"✅ ChromaDB initialized locally with rag module: .chroma")
+            return vector_store.client, vector_store.collection, vector_store
+        
+    except Exception as e:
+        print(f"❌ ChromaDB initialization failed: {str(e)}")
+        if use_cloud:
+            print(f"💡 Check your cloud credentials (API key, tenant, database) and network connection")
+        else:
+            print(f"💡 Check that fastembed is installed: pip install fastembed")
+        return None, None, None
+
+def chunk_text(text, chunk_size=500, overlap=50, encoding_name="cl100k_base"):
+    """Split text into token-aware overlapping chunks"""
+    try:
+        # Get tokenizer
+        encoding = tiktoken.get_encoding(encoding_name)
+        
+        # Encode the text
+        tokens = encoding.encode(text)
+        
+        chunks = []
+        start = 0
+        
+        while start < len(tokens):
+            # Get chunk
+            end = start + chunk_size
+            chunk_tokens = tokens[start:end]
+            
+            # Decode back to text
+            chunk_text = encoding.decode(chunk_tokens)
+            chunks.append(chunk_text)
+            
+            # Move start position with overlap
+            start = end - overlap
+            
+            # Prevent infinite loop on last chunk
+            if end >= len(tokens):
+                break
+        
+        print(f"📄 Split document into {len(chunks)} chunks")
+        return chunks
+        
+    except Exception as e:
+        print(f"⚠️ Error chunking text: {str(e)}")
+        # Fallback: simple word-based chunking
+        words = text.split()
+        chunk_word_size = chunk_size * 3  # Rough approximation
+        chunks = []
+        for i in range(0, len(words), chunk_word_size - overlap * 3):
+            chunk = ' '.join(words[i:i + chunk_word_size])
+            chunks.append(chunk)
+        return chunks
+
+def embed_and_store_document(collection, document_text, document_id="user_guide", vector_store=None):
+    """Chunk and store document in ChromaDB with auto-embeddings"""
+    try:
+        if not collection:
+            print("⚠️ No ChromaDB collection available")
+            return False
+        
+        # Clear existing documents for this ID
+        try:
+            collection.delete(where={"doc_id": document_id})
+        except:
+            pass  # Collection might be empty
+        
+        # Chunk the document
+        chunks = chunk_text(document_text, chunk_size=500, overlap=50)
+        
+        # Use ChromaVectorStore if available (local mode), otherwise use direct collection (cloud mode)
+        if vector_store:
+            # Prepare documents for ChromaVectorStore.upsert_texts
+            docs = [
+                {
+                    "id": f"{document_id}_chunk_{i}",
+                    "content": chunk,
+                    "metadata": {"doc_id": document_id, "chunk_index": i}
+                }
+                for i, chunk in enumerate(chunks)
+            ]
+            vector_store.upsert_texts(docs, source="user_guide")
+        else:
+            # Cloud mode: use direct collection API
+            ids = [f"{document_id}_chunk_{i}" for i in range(len(chunks))]
+            metadatas = [{"doc_id": document_id, "chunk_index": i} for i in range(len(chunks))]
+            collection.add(
+                documents=chunks,
+                ids=ids,
+                metadatas=metadatas
+            )
+        
+        print(f"✅ Stored {len(chunks)} chunks in ChromaDB")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error storing document in ChromaDB: {str(e)}")
+        return False
+
+def query_chromadb(collection, query_text, n_results=3, vector_store=None):
+    """Semantic search to retrieve relevant document chunks"""
+    try:
+        if not collection:
+            print("⚠️ No ChromaDB collection available")
+            return []
+        
+        # Use ChromaVectorStore if available (local mode), otherwise use direct collection (cloud mode)
+        if vector_store:
+            # Use ChromaVectorStore.similarity_search
+            results = vector_store.similarity_search(query_text, k=n_results)
+            documents = [r["content"] for r in results]
+        else:
+            # Cloud mode: use direct collection API
+            results = collection.query(
+                query_texts=[query_text],
+                n_results=n_results
+            )
+            documents = results['documents'][0] if results['documents'] else []
+        
+        print(f"🔍 Retrieved {len(documents)} relevant chunks from ChromaDB")
+        return documents
+        
+    except Exception as e:
+        print(f"❌ Error querying ChromaDB: {str(e)}")
+        return []
 
 def create_support_ticket(name, email, question, previous_question=""):
     """Create a customer support ticket"""
@@ -212,7 +394,19 @@ def summarize_user_guide(client, text, summary_style="concise", max_tokens=300, 
             temperature=temperature
         )
         
-        return response.choices[0].message.content
+        summary = response.choices[0].message.content
+        
+        # Store document in ChromaDB for semantic search
+        if st.session_state.chroma_collection:
+            print("📦 Storing document in ChromaDB...")
+            embed_and_store_document(
+                st.session_state.chroma_collection,
+                text,
+                document_id="user_guide",
+                vector_store=st.session_state.chroma_vector_store
+            )
+        
+        return summary
         
     except Exception as e:
         return f"❌ Error generating summary: {str(e)}"
@@ -333,9 +527,27 @@ IMPORTANT:
             },
         ]
 
+        # Try to get relevant context from ChromaDB first
+        relevant_chunks = []
+        if st.session_state.chroma_collection and guide_document:
+            relevant_chunks = query_chromadb(
+                st.session_state.chroma_collection,
+                question,
+                n_results=3,
+                vector_store=st.session_state.chroma_vector_store
+            )
+        
         # Create context with document information
         context = f"User Guide Summary:\n{guide_summary}"
-        if guide_document:
+        
+        # Use ChromaDB results if available, otherwise fall back to full document
+        if relevant_chunks:
+            context += "\n\nRelevant Information from User Guide:\n"
+            for i, chunk in enumerate(relevant_chunks, 1):
+                context += f"\n[Section {i}]\n{chunk}\n"
+            print("Chroma context 🤓")
+            print(context)
+        elif guide_document:
             context += (
                 f"\n\nOriginal Document:\n{guide_document[:2000]}..."
                 if len(guide_document) > 2000
@@ -600,8 +812,8 @@ def display_assistant_response(answer, reasoning=None, tool_call=None):
                     st.code(tool_call)
         with col2:
             key=f"tts_{hash(answer)}"
-            # if key not in st.session_state.tts_playing:
-            #     st.session_state.tts_playing[key] = False
+            if key not in st.session_state.tts_playing:
+                st.session_state.tts_playing[key] = False
 
             if not st.session_state.tts_playing[key]:
                 if st.button("🔊", key=key):
@@ -652,6 +864,49 @@ def main():
         help="Choose the style of summary you want"
     )
     
+    # ChromaDB Configuration
+    st.sidebar.header("🗄️ ChromaDB Configuration")
+    
+    chromadb_mode = st.sidebar.radio(
+        "Connection Mode",
+        ["Local Storage", "Cloud (Managed)"],
+        index=1,  # Default to Cloud (Managed)
+        help="Choose how to connect to ChromaDB"
+    )
+    
+    # Default values - Load from environment variables if available
+    use_chromadb_cloud = False
+    chromadb_api_key = os.getenv("CHROMADB_API_KEY", "")
+    chromadb_tenant = os.getenv("CHROMADB_TENANT", "")
+    chromadb_database = os.getenv("CHROMADB_DATABASE", "")
+    
+    if chromadb_mode == "Cloud (Managed)":
+        use_chromadb_cloud = True
+        chromadb_api_key = st.sidebar.text_input(
+            "API Key",
+            value=chromadb_api_key,
+            type="password",
+            help="Your ChromaDB Cloud API key (or set CHROMADB_API_KEY in .env)"
+        )
+        chromadb_tenant = st.sidebar.text_input(
+            "Tenant ID",
+            value=chromadb_tenant,
+            help="Your ChromaDB Cloud tenant ID (or set CHROMADB_TENANT in .env)"
+        )
+        chromadb_database = st.sidebar.text_input(
+            "Database Name",
+            value=chromadb_database,
+            help="Your ChromaDB Cloud database name (or set CHROMADB_DATABASE in .env)"
+        )
+        
+        if chromadb_api_key and chromadb_tenant and chromadb_database:
+            st.sidebar.info(f"☁️ Cloud: {chromadb_tenant}/{chromadb_database}")
+        else:
+            st.sidebar.warning("⚠️ Please enter all cloud credentials")
+    
+    else:  # Local Storage
+        st.sidebar.info("💾 Using local ChromaDB storage at .chroma")
+    
     # Advanced settings
     with st.sidebar.expander("Advanced Settings"):
         max_tokens = st.slider("Max Output Length", 150, 1000, 300, 50)
@@ -671,6 +926,34 @@ def main():
     # Initialize client
     client = initialize_client()
     tts = load_tts('eng')
+    
+    # Initialize ChromaDB if not already initialized or if settings changed
+    current_chromadb_config = (use_chromadb_cloud, chromadb_api_key, chromadb_tenant, chromadb_database)
+    previous_chromadb_config = st.session_state.get('chromadb_config', None)
+    
+    if st.session_state.chroma_client is None or current_chromadb_config != previous_chromadb_config:
+        with st.spinner("🔄 Initializing ChromaDB..."):
+            chroma_client, chroma_collection, chroma_vector_store = initialize_chromadb(
+                use_cloud=use_chromadb_cloud,
+                api_key=chromadb_api_key,
+                tenant=chromadb_tenant,
+                database=chromadb_database
+            )
+            st.session_state.chroma_client = chroma_client
+            st.session_state.chroma_collection = chroma_collection
+            st.session_state.chroma_vector_store = chroma_vector_store
+            st.session_state.chromadb_config = current_chromadb_config
+            
+            # Show connection status
+            if chroma_client is not None:
+                if use_chromadb_cloud:
+                    st.sidebar.success(f"✅ Connected to ChromaDB Cloud: {chromadb_tenant}/{chromadb_database}")
+                else:
+                    st.sidebar.success("✅ ChromaDB initialized locally")
+            else:
+                st.sidebar.error("❌ ChromaDB initialization failed")
+                if use_chromadb_cloud:
+                    st.sidebar.warning("⚠️ Could not connect to ChromaDB Cloud. Please check your credentials and network connection.")
     
     if client is None or tts is None:
         st.stop()
