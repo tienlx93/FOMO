@@ -9,7 +9,7 @@ import tiktoken
 
 from audio_player import create_audio_player
 from tts import load_tts, speak
-from rag import ChromaVectorStore, ChromaConfig
+from rag import ChromaVectorStore, ChromaConfig, PineconeVectorStore, PineconeConfig
 
 # Load environment variables from .env file
 load_dotenv()
@@ -120,6 +120,8 @@ if 'chromadb_config' not in st.session_state:
     st.session_state.chromadb_config = None
 if 'chroma_vector_store' not in st.session_state:
     st.session_state.chroma_vector_store = None
+if 'vector_store_type' not in st.session_state:
+    st.session_state.vector_store_type = None
 
 def initialize_client():
     """Initialize Azure OpenAI client with error handling"""
@@ -864,14 +866,14 @@ def main():
         help="Choose the style of summary you want"
     )
     
-    # ChromaDB Configuration
-    st.sidebar.header("🗄️ ChromaDB Configuration")
+    # Vector Database Configuration
+    st.sidebar.header("🗄️ Vector Database Configuration")
     
-    chromadb_mode = st.sidebar.radio(
-        "Connection Mode",
-        ["Local Storage", "Cloud (Managed)"],
-        index=1,  # Default to Cloud (Managed)
-        help="Choose how to connect to ChromaDB"
+    vectordb_type = st.sidebar.radio(
+        "Database Type",
+        ["ChromaDB (Local)", "ChromaDB (Cloud)", "Pinecone"],
+        index=2,  # Default to Pinecone
+        help="Choose your vector database provider"
     )
     
     # Default values - Load from environment variables if available
@@ -879,8 +881,11 @@ def main():
     chromadb_api_key = os.getenv("CHROMADB_API_KEY", "")
     chromadb_tenant = os.getenv("CHROMADB_TENANT", "")
     chromadb_database = os.getenv("CHROMADB_DATABASE", "")
+    pinecone_api_key = os.getenv("PINECONE_API_KEY", "")
+    pinecone_environment = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
+    pinecone_index_name = os.getenv("PINECONE_INDEX_NAME", "fomo-guides")
     
-    if chromadb_mode == "Cloud (Managed)":
+    if vectordb_type == "ChromaDB (Cloud)":
         use_chromadb_cloud = True
         chromadb_api_key = st.sidebar.text_input(
             "API Key",
@@ -904,7 +909,30 @@ def main():
         else:
             st.sidebar.warning("⚠️ Please enter all cloud credentials")
     
-    else:  # Local Storage
+    elif vectordb_type == "Pinecone":
+        pinecone_api_key = st.sidebar.text_input(
+            "Pinecone API Key",
+            value=pinecone_api_key,
+            type="password",
+            help="Your Pinecone API key (or set PINECONE_API_KEY in .env)"
+        )
+        pinecone_index_name = st.sidebar.text_input(
+            "Index Name",
+            value=pinecone_index_name,
+            help="Your Pinecone index name (or set PINECONE_INDEX_NAME in .env)"
+        )
+        pinecone_environment = st.sidebar.text_input(
+            "Region",
+            value=pinecone_environment,
+            help="Pinecone region (or set PINECONE_ENVIRONMENT in .env)"
+        )
+        
+        if pinecone_api_key and pinecone_index_name:
+            st.sidebar.info(f"🌲 Pinecone: {pinecone_index_name} ({pinecone_environment})")
+        else:
+            st.sidebar.warning("⚠️ Please enter Pinecone API key and index name")
+    
+    else:  # ChromaDB (Local)
         st.sidebar.info("💾 Using local ChromaDB storage at .chroma")
     
     # Advanced settings
@@ -927,33 +955,60 @@ def main():
     client = initialize_client()
     tts = load_tts('eng')
     
-    # Initialize ChromaDB if not already initialized or if settings changed
-    current_chromadb_config = (use_chromadb_cloud, chromadb_api_key, chromadb_tenant, chromadb_database)
-    previous_chromadb_config = st.session_state.get('chromadb_config', None)
+    # Initialize Vector Database if not already initialized or if settings changed
+    current_vectordb_config = (vectordb_type, use_chromadb_cloud, chromadb_api_key, chromadb_tenant, chromadb_database, pinecone_api_key, pinecone_index_name, pinecone_environment)
+    previous_vectordb_config = st.session_state.get('chromadb_config', None)
     
-    if st.session_state.chroma_client is None or current_chromadb_config != previous_chromadb_config:
-        with st.spinner("🔄 Initializing ChromaDB..."):
-            chroma_client, chroma_collection, chroma_vector_store = initialize_chromadb(
-                use_cloud=use_chromadb_cloud,
-                api_key=chromadb_api_key,
-                tenant=chromadb_tenant,
-                database=chromadb_database
-            )
-            st.session_state.chroma_client = chroma_client
-            st.session_state.chroma_collection = chroma_collection
-            st.session_state.chroma_vector_store = chroma_vector_store
-            st.session_state.chromadb_config = current_chromadb_config
-            
-            # Show connection status
-            if chroma_client is not None:
-                if use_chromadb_cloud:
-                    st.sidebar.success(f"✅ Connected to ChromaDB Cloud: {chromadb_tenant}/{chromadb_database}")
-                else:
-                    st.sidebar.success("✅ ChromaDB initialized locally")
+    if st.session_state.chroma_client is None or current_vectordb_config != previous_vectordb_config:
+        with st.spinner(f"🔄 Initializing {vectordb_type}..."):
+            if vectordb_type == "Pinecone":
+                print("🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑")
+                print(pinecone_api_key)
+                try:
+                    if not pinecone_api_key:
+                        st.sidebar.error("❌ Pinecone API key required")
+                        st.stop()
+                    
+                    os.environ["PINECONE_API_KEY"] = pinecone_api_key
+                    os.environ["PINECONE_ENVIRONMENT"] = pinecone_environment
+                    
+                    config = PineconeConfig(
+                        index_name=pinecone_index_name,
+                        region=pinecone_environment
+                    )
+                    pinecone_store = PineconeVectorStore(config)
+                    
+                    st.session_state.chroma_client = pinecone_store
+                    st.session_state.chroma_collection = pinecone_store.index
+                    st.session_state.chroma_vector_store = pinecone_store
+                    st.session_state.vector_store_type = "pinecone"
+                    st.session_state.chromadb_config = current_vectordb_config
+                    st.sidebar.success(f"✅ Connected to Pinecone: {pinecone_index_name}")
+                except Exception as e:
+                    st.sidebar.error(f"❌ Pinecone initialization failed: {str(e)}")
+                    st.stop()
             else:
-                st.sidebar.error("❌ ChromaDB initialization failed")
-                if use_chromadb_cloud:
-                    st.sidebar.warning("⚠️ Could not connect to ChromaDB Cloud. Please check your credentials and network connection.")
+                chroma_client, chroma_collection, chroma_vector_store = initialize_chromadb(
+                    use_cloud=(vectordb_type == "ChromaDB (Cloud)"),
+                    api_key=chromadb_api_key,
+                    tenant=chromadb_tenant,
+                    database=chromadb_database
+                )
+                st.session_state.chroma_client = chroma_client
+                st.session_state.chroma_collection = chroma_collection
+                st.session_state.chroma_vector_store = chroma_vector_store
+                st.session_state.vector_store_type = "chroma"
+                st.session_state.chromadb_config = current_vectordb_config
+                
+                if chroma_client is not None:
+                    if vectordb_type == "ChromaDB (Cloud)":
+                        st.sidebar.success(f"✅ Connected to ChromaDB Cloud: {chromadb_tenant}/{chromadb_database}")
+                    else:
+                        st.sidebar.success("✅ ChromaDB initialized locally")
+                else:
+                    st.sidebar.error("❌ ChromaDB initialization failed")
+                    if vectordb_type == "ChromaDB (Cloud)":
+                        st.sidebar.warning("⚠️ Could not connect to ChromaDB Cloud. Please check your credentials and network connection.")
     
     if client is None or tts is None:
         st.stop()
