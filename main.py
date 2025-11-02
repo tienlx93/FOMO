@@ -4,12 +4,11 @@ from openai import AzureOpenAI
 from dotenv import load_dotenv
 import json
 from datetime import datetime
-import chromadb
 import tiktoken
 
 from audio_player import create_audio_player
 from tts import load_tts, speak
-from rag import ChromaVectorStore, ChromaConfig, PineconeVectorStore, PineconeConfig
+from rag import PineconeVectorStore, PineconeConfig
 
 # Load environment variables from .env file
 load_dotenv()
@@ -112,14 +111,14 @@ if "tts_playing" not in st.session_state:
     st.session_state.tts_playing = {}
 if "tts_last_clicked" not in st.session_state:
     st.session_state.tts_last_clicked = None
-if 'chroma_client' not in st.session_state:
-    st.session_state.chroma_client = None
-if 'chroma_collection' not in st.session_state:
-    st.session_state.chroma_collection = None
-if 'chromadb_config' not in st.session_state:
-    st.session_state.chromadb_config = None
-if 'chroma_vector_store' not in st.session_state:
-    st.session_state.chroma_vector_store = None
+if 'vector_client' not in st.session_state:
+    st.session_state.vector_client = None
+if 'vector_collection' not in st.session_state:
+    st.session_state.vector_collection = None
+if 'vectordb_config' not in st.session_state:
+    st.session_state.vectordb_config = None
+if 'vector_store' not in st.session_state:
+    st.session_state.vector_store = None
 if 'vector_store_type' not in st.session_state:
     st.session_state.vector_store_type = None
 
@@ -144,64 +143,7 @@ def initialize_client():
         st.error(f"❌ Failed to initialize Azure OpenAI client: {str(e)}")
         return None
 
-def initialize_chromadb(use_cloud=False, api_key="", tenant="", database=""):
-    """Initialize ChromaDB client and collection for semantic search
-    
-    Args:
-        use_cloud: If True, use CloudClient with authentication
-        api_key: API key for CloudClient authentication
-        tenant: Tenant ID for CloudClient
-        database: Database name for CloudClient
-    """
-    try:
-        if use_cloud:
-            # Connect to ChromaDB Cloud with authentication
-            if not api_key or not tenant or not database:
-                print("⚠️ Cloud mode requires API key, tenant, and database")
-                return None, None, None
-            
-            client = chromadb.CloudClient(
-                api_key=api_key,
-                tenant=tenant,
-                database=database
-            )
-            print(f"☁️ Connecting to ChromaDB Cloud (tenant: {tenant}, database: {database})...")
-            
-            # Test connection
-            try:
-                client.heartbeat()
-            except Exception as e:
-                print(f"⚠️ ChromaDB connection test failed: {str(e)}")
-                print(f"💡 Check your cloud credentials and network connection")
-                return None, None, None
-            
-            # Create or get collection with auto-embedding
-            collection = client.get_or_create_collection(
-                name="user_guide_docs",
-                metadata={"hnsw:space": "cosine"}
-            )
-            
-            print(f"✅ ChromaDB Cloud connected: {tenant}/{database}")
-            return client, collection, None
-            
-        else:
-            # Use local ChromaVectorStore from rag module
-            config = ChromaConfig(
-                persist_dir=".chroma",
-                collection_name="user_guide_docs",
-                metadata={"hnsw:space": "cosine"}
-            )
-            vector_store = ChromaVectorStore(config)
-            print(f"✅ ChromaDB initialized locally with rag module: .chroma")
-            return vector_store.client, vector_store.collection, vector_store
-        
-    except Exception as e:
-        print(f"❌ ChromaDB initialization failed: {str(e)}")
-        if use_cloud:
-            print(f"💡 Check your cloud credentials (API key, tenant, database) and network connection")
-        else:
-            print(f"💡 Check that fastembed is installed: pip install fastembed")
-        return None, None, None
+
 
 def chunk_text(text, chunk_size=500, overlap=50, encoding_name="cl100k_base"):
     """Split text into token-aware overlapping chunks"""
@@ -246,75 +188,49 @@ def chunk_text(text, chunk_size=500, overlap=50, encoding_name="cl100k_base"):
         return chunks
 
 def embed_and_store_document(collection, document_text, document_id="user_guide", vector_store=None):
-    """Chunk and store document in ChromaDB with auto-embeddings"""
+    """Chunk and store document in vector database with embeddings"""
     try:
-        if not collection:
-            print("⚠️ No ChromaDB collection available")
+        if not vector_store:
+            print("⚠️ No vector store available")
             return False
-        
-        # Clear existing documents for this ID
-        try:
-            collection.delete(where={"doc_id": document_id})
-        except:
-            pass  # Collection might be empty
         
         # Chunk the document
         chunks = chunk_text(document_text, chunk_size=500, overlap=50)
         
-        # Use ChromaVectorStore if available (local mode), otherwise use direct collection (cloud mode)
-        if vector_store:
-            # Prepare documents for ChromaVectorStore.upsert_texts
-            docs = [
-                {
-                    "id": f"{document_id}_chunk_{i}",
-                    "content": chunk,
-                    "metadata": {"doc_id": document_id, "chunk_index": i}
-                }
-                for i, chunk in enumerate(chunks)
-            ]
-            vector_store.upsert_texts(docs, source="user_guide")
-        else:
-            # Cloud mode: use direct collection API
-            ids = [f"{document_id}_chunk_{i}" for i in range(len(chunks))]
-            metadatas = [{"doc_id": document_id, "chunk_index": i} for i in range(len(chunks))]
-            collection.add(
-                documents=chunks,
-                ids=ids,
-                metadatas=metadatas
-            )
+        # Prepare documents for vector store
+        docs = [
+            {
+                "id": f"{document_id}_chunk_{i}",
+                "content": chunk,
+                "metadata": {"doc_id": document_id, "chunk_index": i}
+            }
+            for i, chunk in enumerate(chunks)
+        ]
+        vector_store.upsert_texts(docs, source="user_guide")
         
-        print(f"✅ Stored {len(chunks)} chunks in ChromaDB")
+        print(f"✅ Stored {len(chunks)} chunks in vector database")
         return True
         
     except Exception as e:
-        print(f"❌ Error storing document in ChromaDB: {str(e)}")
+        print(f"❌ Error storing document in vector database: {str(e)}")
         return False
 
-def query_chromadb(collection, query_text, n_results=3, vector_store=None):
+def query_vector_db(collection, query_text, n_results=3, vector_store=None):
     """Semantic search to retrieve relevant document chunks"""
     try:
-        if not collection:
-            print("⚠️ No ChromaDB collection available")
+        if not vector_store:
+            print("⚠️ No vector store available")
             return []
         
-        # Use ChromaVectorStore if available (local mode), otherwise use direct collection (cloud mode)
-        if vector_store:
-            # Use ChromaVectorStore.similarity_search
-            results = vector_store.similarity_search(query_text, k=n_results)
-            documents = [r["content"] for r in results]
-        else:
-            # Cloud mode: use direct collection API
-            results = collection.query(
-                query_texts=[query_text],
-                n_results=n_results
-            )
-            documents = results['documents'][0] if results['documents'] else []
+        # Use vector store similarity search
+        results = vector_store.similarity_search(query_text, k=n_results)
+        documents = [r["content"] for r in results]
         
-        print(f"🔍 Retrieved {len(documents)} relevant chunks from ChromaDB")
+        print(f"🔍 Retrieved {len(documents)} relevant chunks from vector database")
         return documents
         
     except Exception as e:
-        print(f"❌ Error querying ChromaDB: {str(e)}")
+        print(f"❌ Error querying vector database: {str(e)}")
         return []
 
 def create_support_ticket(name, email, question, previous_question=""):
@@ -354,8 +270,12 @@ def create_support_ticket(name, email, question, previous_question=""):
         }
 
 
-def summarize_user_guide(client, text, summary_style="concise", max_tokens=300, temperature=0.3, language="English", model="gpt-4o-mini"):
+def summarize_user_guide(client, text, summary_style="concise", max_tokens=300, temperature=0.3, language="English", model=None):
     """Generate user guide summary using Azure OpenAI"""
+    if model is None:
+        model = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        if not model:
+            return "❌ Error: AZURE_OPENAI_DEPLOYMENT not set in environment variables"
     try:
         if not text.strip():
             return "⚠️ No content to summarize. Please provide a user guide document."
@@ -398,14 +318,14 @@ def summarize_user_guide(client, text, summary_style="concise", max_tokens=300, 
         
         summary = response.choices[0].message.content
         
-        # Store document in ChromaDB for semantic search
-        if st.session_state.chroma_collection:
-            print("📦 Storing document in ChromaDB...")
+        # Store document in vector database for semantic search
+        if st.session_state.vector_store:
+            print("📦 Storing document in vector database...")
             embed_and_store_document(
-                st.session_state.chroma_collection,
+                st.session_state.vector_collection,
                 text,
                 document_id="user_guide",
-                vector_store=st.session_state.chroma_vector_store
+                vector_store=st.session_state.vector_store
             )
         
         return summary
@@ -413,8 +333,12 @@ def summarize_user_guide(client, text, summary_style="concise", max_tokens=300, 
     except Exception as e:
         return f"❌ Error generating summary: {str(e)}"
 
-def answer_question(client, question, guide_summary, guide_document="", language="English", model="gpt-4o-mini"):
+def answer_question(client, question, guide_summary, guide_document="", language="English", model=None):
     """Answer questions about the user guide using native OpenAI function calling with Chain of Thought reasoning"""
+    if model is None:
+        model = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        if not model:
+            return "❌ Error: AZURE_OPENAI_DEPLOYMENT not set in environment variables", None, None
     try:
         if not question.strip():
             return "⚠️ Please ask a question about the user guide."
@@ -529,25 +453,25 @@ IMPORTANT:
             },
         ]
 
-        # Try to get relevant context from ChromaDB first
+        # Try to get relevant context from vector database first
         relevant_chunks = []
-        if st.session_state.chroma_collection and guide_document:
-            relevant_chunks = query_chromadb(
-                st.session_state.chroma_collection,
+        if st.session_state.vector_store and guide_document:
+            relevant_chunks = query_vector_db(
+                st.session_state.vector_collection,
                 question,
                 n_results=3,
-                vector_store=st.session_state.chroma_vector_store
+                vector_store=st.session_state.vector_store
             )
         
         # Create context with document information
         context = f"User Guide Summary:\n{guide_summary}"
         
-        # Use ChromaDB results if available, otherwise fall back to full document
+        # Use vector database results if available, otherwise fall back to full document
         if relevant_chunks:
             context += "\n\nRelevant Information from User Guide:\n"
             for i, chunk in enumerate(relevant_chunks, 1):
                 context += f"\n[Section {i}]\n{chunk}\n"
-            print("Chroma context 🤓")
+            print("Vector DB context 🤓")
             print(context)
         elif guide_document:
             context += (
@@ -728,8 +652,12 @@ Our support team will review your query and respond within 24-48 hours.""",
         print(f"❌ Error answering question: {str(e)}")
         return f"❌ Error answering question: {str(e)}", None, None
 
-def detect_question_language(client, question, model="gpt-4o-mini"):
+def detect_question_language(client, question, model=None):
     """Detect the language of the user's question using AI"""
+    if model is None:
+        model = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        if not model:
+            return "English"  # Fallback to English if deployment not set
     try:
         if not question.strip():
             return "English"  # Default fallback
@@ -780,8 +708,12 @@ Language:"""
         print(f"Language detection error: {e}")
         return "English"  # Fallback to English on error
 
-def answer_question_auto_lang(client, question, guide_summary, guide_document="", fallback_language="English", model="gpt-4o-mini"):
+def answer_question_auto_lang(client, question, guide_summary, guide_document="", fallback_language="English", model=None):
     """Answer questions with automatic language detection from the question"""
+    if model is None:
+        model = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        if not model:
+            return "❌ Error: AZURE_OPENAI_DEPLOYMENT not set in environment variables", None, None
     try:
         if not question.strip():
             return "⚠️ Please ask a question about the user guide."
@@ -844,13 +776,15 @@ def main():
     # Sidebar configuration
     st.sidebar.header("⚙️ Configuration")
     
-    # Model selection
-    model = st.sidebar.selectbox(
-        "🤖 AI Model",
-        ["gpt-4o-mini", "gpt-4o", "gpt-4", "gpt-35-turbo", "gpt-35-turbo-16k"],
-        index=0,
-        help="Choose the Azure OpenAI model for processing"
-    )
+    # Get deployment name from environment variable
+    model = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    
+    if not model:
+        st.sidebar.error("⚠️ AZURE_OPENAI_DEPLOYMENT not set in environment variables")
+        st.stop()
+    
+    # Display current deployment
+    st.sidebar.info(f"🤖 Using deployment: **{model}**")
     
     # Language selection
     language = st.sidebar.selectbox(
@@ -869,146 +803,76 @@ def main():
     # Vector Database Configuration
     st.sidebar.header("🗄️ Vector Database Configuration")
     
-    vectordb_type = st.sidebar.radio(
-        "Database Type",
-        ["ChromaDB (Local)", "ChromaDB (Cloud)", "Pinecone"],
-        index=2,  # Default to Pinecone
-        help="Choose your vector database provider"
-    )
-    
     # Default values - Load from environment variables if available
-    use_chromadb_cloud = False
-    chromadb_api_key = os.getenv("CHROMADB_API_KEY", "")
-    chromadb_tenant = os.getenv("CHROMADB_TENANT", "")
-    chromadb_database = os.getenv("CHROMADB_DATABASE", "")
     pinecone_api_key = os.getenv("PINECONE_API_KEY", "")
     pinecone_environment = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
-    pinecone_index_name = os.getenv("PINECONE_INDEX_NAME", "fomo-guides")
+    pinecone_index_name = os.getenv("PINECONE_INDEX_NAME", "fomo-db")
     
-    if vectordb_type == "ChromaDB (Cloud)":
-        use_chromadb_cloud = True
-        chromadb_api_key = st.sidebar.text_input(
-            "API Key",
-            value=chromadb_api_key,
-            type="password",
-            help="Your ChromaDB Cloud API key (or set CHROMADB_API_KEY in .env)"
-        )
-        chromadb_tenant = st.sidebar.text_input(
-            "Tenant ID",
-            value=chromadb_tenant,
-            help="Your ChromaDB Cloud tenant ID (or set CHROMADB_TENANT in .env)"
-        )
-        chromadb_database = st.sidebar.text_input(
-            "Database Name",
-            value=chromadb_database,
-            help="Your ChromaDB Cloud database name (or set CHROMADB_DATABASE in .env)"
-        )
-        
-        if chromadb_api_key and chromadb_tenant and chromadb_database:
-            st.sidebar.info(f"☁️ Cloud: {chromadb_tenant}/{chromadb_database}")
-        else:
-            st.sidebar.warning("⚠️ Please enter all cloud credentials")
+    # Pinecone configuration
+    pinecone_api_key = st.sidebar.text_input(
+        "Pinecone API Key",
+        value=pinecone_api_key,
+        type="password",
+        help="Your Pinecone API key (or set PINECONE_API_KEY in .env)"
+    )
+    pinecone_index_name = st.sidebar.text_input(
+        "Index Name",
+        value=pinecone_index_name,
+        help="Your Pinecone index name (or set PINECONE_INDEX_NAME in .env)"
+    )
+    pinecone_environment = st.sidebar.text_input(
+        "Region",
+        value=pinecone_environment,
+        help="Pinecone region (or set PINECONE_ENVIRONMENT in .env)"
+    )
     
-    elif vectordb_type == "Pinecone":
-        pinecone_api_key = st.sidebar.text_input(
-            "Pinecone API Key",
-            value=pinecone_api_key,
-            type="password",
-            help="Your Pinecone API key (or set PINECONE_API_KEY in .env)"
-        )
-        pinecone_index_name = st.sidebar.text_input(
-            "Index Name",
-            value=pinecone_index_name,
-            help="Your Pinecone index name (or set PINECONE_INDEX_NAME in .env)"
-        )
-        pinecone_environment = st.sidebar.text_input(
-            "Region",
-            value=pinecone_environment,
-            help="Pinecone region (or set PINECONE_ENVIRONMENT in .env)"
-        )
-        
-        if pinecone_api_key and pinecone_index_name:
-            st.sidebar.info(f"🌲 Pinecone: {pinecone_index_name} ({pinecone_environment})")
-        else:
-            st.sidebar.warning("⚠️ Please enter Pinecone API key and index name")
-    
-    else:  # ChromaDB (Local)
-        st.sidebar.info("💾 Using local ChromaDB storage at .chroma")
+    if pinecone_api_key and pinecone_index_name:
+        st.sidebar.info(f"🌲 Pinecone: {pinecone_index_name} ({pinecone_environment})")
+    else:
+        st.sidebar.warning("⚠️ Please enter Pinecone API key and index name")
     
     # Advanced settings
     with st.sidebar.expander("Advanced Settings"):
         max_tokens = st.slider("Max Output Length", 150, 1000, 300, 50)
         temperature = st.slider("Creativity (Temperature)", 0.0, 1.0, 0.3, 0.1)
         
-        # Model information
-        st.info(f"**Selected Model:** {model}")
-        model_info = {
-            "gpt-4o-mini": "Fast and cost-effective, great for most tasks",
-            "gpt-4o": "Advanced reasoning and complex tasks",
-            "gpt-4": "High-quality responses with deep understanding",
-            "gpt-35-turbo": "Balanced performance and speed",
-            "gpt-35-turbo-16k": "Extended context length support"
-        }
-        st.caption(model_info.get(model, "Azure OpenAI model"))
+        # Deployment information
+        st.info(f"**Azure OpenAI Deployment:** {model}")
+        st.caption("This deployment is configured via AZURE_OPENAI_DEPLOYMENT environment variable")
     
     # Initialize client
     client = initialize_client()
     tts = load_tts('eng')
     
     # Initialize Vector Database if not already initialized or if settings changed
-    current_vectordb_config = (vectordb_type, use_chromadb_cloud, chromadb_api_key, chromadb_tenant, chromadb_database, pinecone_api_key, pinecone_index_name, pinecone_environment)
-    previous_vectordb_config = st.session_state.get('chromadb_config', None)
+    current_vectordb_config = (pinecone_api_key, pinecone_index_name, pinecone_environment)
+    previous_vectordb_config = st.session_state.get('vectordb_config', None)
     
-    if st.session_state.chroma_client is None or current_vectordb_config != previous_vectordb_config:
-        with st.spinner(f"🔄 Initializing {vectordb_type}..."):
-            if vectordb_type == "Pinecone":
-                print("🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑")
-                print(pinecone_api_key)
-                try:
-                    if not pinecone_api_key:
-                        st.sidebar.error("❌ Pinecone API key required")
-                        st.stop()
-                    
-                    os.environ["PINECONE_API_KEY"] = pinecone_api_key
-                    os.environ["PINECONE_ENVIRONMENT"] = pinecone_environment
-                    
-                    config = PineconeConfig(
-                        index_name=pinecone_index_name,
-                        region=pinecone_environment
-                    )
-                    pinecone_store = PineconeVectorStore(config)
-                    
-                    st.session_state.chroma_client = pinecone_store
-                    st.session_state.chroma_collection = pinecone_store.index
-                    st.session_state.chroma_vector_store = pinecone_store
-                    st.session_state.vector_store_type = "pinecone"
-                    st.session_state.chromadb_config = current_vectordb_config
-                    st.sidebar.success(f"✅ Connected to Pinecone: {pinecone_index_name}")
-                except Exception as e:
-                    st.sidebar.error(f"❌ Pinecone initialization failed: {str(e)}")
+    if st.session_state.vector_client is None or current_vectordb_config != previous_vectordb_config:
+        with st.spinner("🔄 Initializing Pinecone..."):
+            try:
+                if not pinecone_api_key:
+                    st.sidebar.error("❌ Pinecone API key required")
                     st.stop()
-            else:
-                chroma_client, chroma_collection, chroma_vector_store = initialize_chromadb(
-                    use_cloud=(vectordb_type == "ChromaDB (Cloud)"),
-                    api_key=chromadb_api_key,
-                    tenant=chromadb_tenant,
-                    database=chromadb_database
-                )
-                st.session_state.chroma_client = chroma_client
-                st.session_state.chroma_collection = chroma_collection
-                st.session_state.chroma_vector_store = chroma_vector_store
-                st.session_state.vector_store_type = "chroma"
-                st.session_state.chromadb_config = current_vectordb_config
                 
-                if chroma_client is not None:
-                    if vectordb_type == "ChromaDB (Cloud)":
-                        st.sidebar.success(f"✅ Connected to ChromaDB Cloud: {chromadb_tenant}/{chromadb_database}")
-                    else:
-                        st.sidebar.success("✅ ChromaDB initialized locally")
-                else:
-                    st.sidebar.error("❌ ChromaDB initialization failed")
-                    if vectordb_type == "ChromaDB (Cloud)":
-                        st.sidebar.warning("⚠️ Could not connect to ChromaDB Cloud. Please check your credentials and network connection.")
+                os.environ["PINECONE_API_KEY"] = pinecone_api_key
+                os.environ["PINECONE_ENVIRONMENT"] = pinecone_environment
+                
+                config = PineconeConfig(
+                    index_name=pinecone_index_name,
+                    region=pinecone_environment
+                )
+                pinecone_store = PineconeVectorStore(config)
+                
+                st.session_state.vector_client = pinecone_store
+                st.session_state.vector_collection = pinecone_store.index
+                st.session_state.vector_store = pinecone_store
+                st.session_state.vector_store_type = "pinecone"
+                st.session_state.vectordb_config = current_vectordb_config
+                st.sidebar.success(f"✅ Connected to Pinecone: {pinecone_index_name}")
+            except Exception as e:
+                st.sidebar.error(f"❌ Pinecone initialization failed: {str(e)}")
+                st.stop()
     
     if client is None or tts is None:
         st.stop()

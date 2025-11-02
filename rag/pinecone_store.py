@@ -2,24 +2,18 @@ import os, uuid
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from pinecone import Pinecone, ServerlessSpec
-from openai import OpenAI
-
-try:
-    from fastembed import TextEmbedding
-    _FASTEMBED_AVAILABLE = True
-except Exception:
-    _FASTEMBED_AVAILABLE = False
+from openai import AzureOpenAI
 
 @dataclass
 class PineconeConfig:
-    index_name: str = "fomo-guides"
-    dimension: int = 384
+    index_name: str = "fomo-db"
+    dimension: int = 1536
     metric: str = "cosine"
     cloud: str = "aws"
     region: str = "us-east-1"
 
 class PineconeVectorStore:
-    """Pinecone vector store with flexible embedding backends."""
+    """Pinecone vector store with Azure OpenAI embeddings."""
     
     def __init__(self, cfg: PineconeConfig):
         self.cfg = cfg
@@ -40,35 +34,47 @@ class PineconeVectorStore:
                     region=cfg.region
                 )
             )
+            print(f"✅ Created new Pinecone index: {cfg.index_name} with dimension {cfg.dimension}")
+        else:
+            # Check if existing index has matching dimension
+            existing_indexes = self.pc.list_indexes()
+            for idx_info in existing_indexes:
+                if idx_info.name == cfg.index_name:
+                    if hasattr(idx_info, 'dimension') and idx_info.dimension != cfg.dimension:
+                        print(f"⚠️ WARNING: Existing index '{cfg.index_name}' has dimension {idx_info.dimension}, but config expects {cfg.dimension}")
+                        print(f"⚠️ This may cause errors. Consider creating a new index or updating dimension config.")
         
         self.index = self.pc.Index(cfg.index_name)
         
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        openai_base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
-        openai_embed_model = os.getenv("OPENAI_EMBED_MODEL", os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"))
+        # Use Azure OpenAI for embeddings
+        azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        azure_embed_deployment = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
         
-        self.embed_fn = None
-        if openai_api_key and openai_base_url:
-            try:
-                self.client = OpenAI(api_key=openai_api_key, base_url=openai_base_url)
-                self.embed_model = openai_embed_model
-                self.embed_fn = self._openai_embed
-            except Exception:
-                self.embed_fn = None
+        if not (azure_api_key and azure_endpoint and azure_embed_deployment):
+            raise RuntimeError("Missing Azure OpenAI configuration. Please set AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, and AZURE_OPENAI_EMBED_DEPLOYMENT")
         
-        if self.embed_fn is None:
-            if not _FASTEMBED_AVAILABLE:
-                raise RuntimeError("No embeddings available: OpenAI failed and fastembed not installed.")
-            model_name = os.getenv("FASTEMBED_MODEL", "BAAI/bge-small-en-v1.5")
-            self._fastembed_model = TextEmbedding(model_name=model_name)
-            self.embed_fn = self._fastembed_embed
+        self.client = AzureOpenAI(
+            api_key=azure_api_key,
+            api_version="2024-07-01-preview",
+            azure_endpoint=azure_endpoint
+        )
+        
+        # Test embedding deployment
+        test_response = self.client.embeddings.create(
+            input="test",
+            model=azure_embed_deployment
+        )
+        
+        self.embed_model = azure_embed_deployment
+        self.embed_fn = self._azure_embed
+        # Update dimension based on embedding size
+        self.cfg.dimension = len(test_response.data[0].embedding)
+        print(f"✅ Using Azure OpenAI embeddings: {azure_embed_deployment} (dimension: {self.cfg.dimension})")
     
-    def _openai_embed(self, texts: List[str]) -> List[List[float]]:
+    def _azure_embed(self, texts: List[str]) -> List[List[float]]:
         resp = self.client.embeddings.create(input=texts, model=self.embed_model)
         return [d.embedding for d in resp.data]
-    
-    def _fastembed_embed(self, texts: List[str]) -> List[List[float]]:
-        return [vec for vec in self._fastembed_model.embed(texts)]
     
     def upsert_texts(self, docs: List[Dict[str, str]], source: str = "upload"):
         vectors = []
