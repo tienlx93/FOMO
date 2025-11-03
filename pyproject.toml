@@ -1,0 +1,36 @@
+[project]
+name = "fomo-user-guide-summarizer"
+version = "1.0.0"
+description = "Transform your user guide documentation into organized, digestible summaries using Azure OpenAI and Streamlit"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = "==3.11.*"
+authors = [
+    { name = "FOMO Team" }
+]
+keywords = [
+    "azure-openai",
+    "streamlit",
+    "summarization",
+    "user-guide",
+    "ai",
+    "nlp",
+    "documentation"
+]
+
+dependencies = [
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "streamlit>=1.28.0",
+    "python-pptx>=0.6.21",
+    "sentence-transformers>=2.2.2",
+    "fastapi>=0.110.0",
+    "fastembed>=0.7.0",
+    "soundfile>=0.12.0",
+    "transformers>=4.30.0",
+    "torch>=2.0.0",
+    "chromadb>=0.4.0",
+    "tiktoken>=0.5.0",
+    "langchain>=1.0.3",
+    "pinecone>=7.3.0",
+]
