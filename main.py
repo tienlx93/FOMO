@@ -7,7 +7,7 @@ from datetime import datetime
 import tiktoken
 
 from audio_player import create_audio_player
-from tts import load_tts, speak
+from tts import load_tts, speak, detect_tts_language
 from rag import PineconeVectorStore, PineconeConfig
 
 # Load environment variables from .env file
@@ -91,7 +91,8 @@ language_instructions = {
     "Japanese": " Please respond in Japanese.",
     "Chinese (Simplified)": " Please respond in Simplified Chinese.",
     "Korean": " Please respond in Korean.",
-    "Arabic": " Please respond in Arabic."
+    "Arabic": " Please respond in Arabic.",
+    "Bahasa Indonesia": " Silakan jawab dalam Bahasa Indonesia."
 }
 
 # Initialize session state
@@ -681,7 +682,7 @@ Language:"""
         # Validate detected language against supported languages
         supported_languages = [
             "English", "Spanish", "French", "German", "Italian", 
-            "Portuguese", "Japanese", "Chinese", "Korean", "Arabic"
+            "Portuguese", "Japanese", "Chinese", "Korean", "Arabic", "Bahasa"
         ]
         
         # Handle variations and ensure we return a supported language
@@ -756,7 +757,8 @@ def display_assistant_response(answer, reasoning=None, tool_call=None):
                     st.rerun()  # ensure immediate refresh to show player
             else:
                 with st.spinner(""):
-                    audio_data, sr = speak(answer, lang='eng')
+                    tts_lang = detect_tts_language(answer)
+                    audio_data, sr = speak(answer, lang=tts_lang)
                 autoplay = (st.session_state.tts_last_clicked == key)
                 create_audio_player(audio_data, sr, autoplay=True)
                 st.session_state.tts_last_clicked = None
@@ -789,7 +791,7 @@ def main():
     # Language selection
     language = st.sidebar.selectbox(
         "🌐 Output Language",
-        ["English", "Spanish", "French", "German", "Italian", "Portuguese", "Japanese", "Chinese (Simplified)", "Korean", "Arabic"],
+        ["English", "Spanish", "French", "German", "Italian", "Portuguese", "Japanese", "Chinese (Simplified)", "Korean", "Arabic", "Bahasa Indonesia"],
         help="Choose the language for the summary and Q&A responses"
     )
     
@@ -1033,7 +1035,8 @@ def main():
                             "¿Cuáles son las características principales descritas en esta guía?",
                             "Quelles sont les procédures étape par étape?",
                             "Welche wichtigen Konfigurationsschritte gibt es?",
-                            "このガイドの主要な機能は何ですか？"
+                            "このガイドの主要な機能は何ですか？",
+                            "Apa saja fitur utama dalam panduan ini?"
                         ]
 
                         cols = st.columns(2)

@@ -2,7 +2,21 @@ from transformers import pipeline
 import soundfile as sf
 import time
 import streamlit as st
+from langdetect import detect
 
+LANG_MAP = {
+    "en": "eng", "vi": "vie", "es": "spa", "fr": "fra", "de": "deu",
+    "zh-cn": "zho", "zh": "zho", "pt": "por", "it": "ita", "id": "ind",
+    "ja": "jpn", "ko": "kor", "ar": "arb"
+}
+
+def detect_tts_language(text):
+    """Detect language and map to MMS-TTS code"""
+    try:
+        lang_code = detect(text)
+        return LANG_MAP.get(lang_code, "eng")
+    except Exception:
+        return "eng"
 
 def timeit(func):
     def wrapper(*args, **kwargs):
@@ -14,21 +28,19 @@ def timeit(func):
     return wrapper
 
 @st.cache_resource
-def load_tts(lang="vie"):
+def load_tts(lang="eng"):
     return pipeline("text-to-speech", model=f"facebook/mms-tts-{lang}")
 
 @timeit
-def speak(text, tts=None, save_path=None, lang="vie"):
-    if tts is None:
-        tts = load_tts(lang)
-
+def speak(text, lang=None, save_path=None):
+    if not lang:
+        lang = detect_tts_language(text);
+    print (lang);
+    tts = load_tts(lang)
     speech = tts(text)
-    print(type(speech["audio"]))
-    print(speech["audio"])
-    audio = speech["audio"].squeeze()  # converts (1, N) → (N,)
+    audio = speech["audio"].squeeze()
     if save_path:
         sf.write(save_path, audio, samplerate=speech["sampling_rate"])
-        print(f"Saved to {save_path}")
         return
     return audio, speech["sampling_rate"]
 
