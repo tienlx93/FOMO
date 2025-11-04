@@ -30,31 +30,55 @@ AZURE_OPENAI_ENDPOINT=your_azure_endpoint_here
 2. Install dependencies:
 
 ```bash
-# Recommended: Use a virtual environment
-python -m venv venv
-source venv/bin/activate   # (Linux/macOS)
-venv\Scripts\activate      # (Windows)
-# Install required packages
-pip install -r requirements.txt
+# Install UV package manager (if not already installed)
+# Follow the official installation guide: https://docs.astral.sh/uv/getting-started/installation/
+
+# Install dependencies and create virtual environment
+uv sync
+
+# Activate the virtual environment
+source .venv/bin/activate   # (Linux/macOS)
+.venv\Scripts\activate      # (Windows)
 ```
 
 ### 2. Running the App
 
+**First-time setup:**
+```bash
+# This will create uv.lock with exact dependency versions
+uv sync
+```
+
 **Streamlit Web App:**
 
 ```bash
+# With UV
+uv run streamlit run main.py
+
+# Or activate environment first
+source .venv/bin/activate
 streamlit run main.py
 ```
 
 **Command Line Version:**
 
 ```bash
+# With UV
+uv run python backend_developer.py
+
+# Or activate environment first
+source .venv/bin/activate
 python backend_developer.py
 ```
 
 **Run Tests:**
 
 ```bash
+# With UV
+uv run python test_app.py
+
+# Or activate environment first
+source .venv/bin/activate
 python test_app.py
 ```
 
@@ -113,7 +137,7 @@ The app includes comprehensive testing covering:
 - **TC_09**: Automatic language detection accuracy
 - **TC_10**: Auto-language Q&A responses
 
-Run tests with: `python test_app.py`
+Run tests with: `uv run python test_app.py`
 
 ## System Architecture 🏗️
 
@@ -137,10 +161,11 @@ Run tests with: `python test_app.py`
 ## File Structure 📁
 
 ```
-├── app.py                 # Main Streamlit application
+├── main.py               # Main Streamlit application
 ├── backend_developer.py   # CLI version
 ├── test_app.py           # Test suite
-├── requirements.txt      # Python dependencies
+├── pyproject.toml        # Project configuration and dependencies
+├── .python-version       # Python version for UV
 ├── .env                 # Environment variables (create this)
 ├── data/
 │   └── user_guide_sample.txt  # Sample data
@@ -149,18 +174,24 @@ Run tests with: `python test_app.py`
 
 ## Dependencies 📦
 
+This project uses [UV](https://docs.astral.sh/uv/) for dependency management. Dependencies are defined in `pyproject.toml`:
+
 - `streamlit>=1.28.0` - Web interface
 - `openai>=1.0.0` - Azure OpenAI integration
 - `python-dotenv>=1.0.0` - Environment variable management
+- Additional ML and NLP libraries for advanced features
+
+Install all dependencies with: `uv sync`
 
 ## Troubleshooting 🔧
 
 **Common Issues:**
 
 1. **"Missing credentials" error**: Ensure `.env` file exists with correct variables
-2. **Import errors**: Run `pip install -r requirements.txt`
+2. **Import errors**: Run `uv sync` to install dependencies
 3. **File not found**: Check that `data/user_guide_sample.txt` exists
-4. **Streamlit not starting**: Verify Streamlit installation with `streamlit --version`
+4. **Streamlit not starting**: Verify installation with `uv run streamlit --version`
+5. **UV not found**: Install UV following the [official installation guide](https://docs.astral.sh/uv/getting-started/installation/)
 
 ## Contributing 🤝
 

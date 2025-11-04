@@ -11,5 +11,11 @@ transformers>=4.30.0
 torch>=2.0.0
 chromadb>=0.4.0
 tiktoken>=0.5.0
+langchain
+langchain-openai
+langchain-community
+langchain-text-splitters
+docx2txt
+pypdf
 pinecone>=7.3.0
 langdetect>= 1.0.9
