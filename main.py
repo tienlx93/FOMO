@@ -256,6 +256,8 @@ def add_ticket(title: str, description: str, priority: str = "medium") -> Dict[s
         "description": description.strip(),
         "priority": priority,
         "status": "open",
+        "answer": "",
+        "answered_at": None,
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
     tickets.append(ticket)
@@ -269,6 +271,23 @@ def update_ticket_status(ticket_id: str, status: str):
             t["status"] = status
             break
     save_tickets(tickets)
+    
+def update_ticket_answer(ticket_id: str, answer: str) -> bool:
+    tickets = load_tickets()
+    updated = False
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    for t in tickets:
+        if t["id"] == ticket_id:
+            t["answer"] = (answer or "").strip()
+            t["answered_at"] = now_iso if t["answer"] else None
+            # Auto-progress status if answer provided
+            if t.get("answer") and t.get("status") in {"open", "in_progress", "done"}:
+                t["status"] = "closed"
+            updated = True
+            break
+    if updated:
+        save_tickets(tickets)
+    return updated
     
 # -------------------------
 # Prompt builders
@@ -834,6 +853,8 @@ def tab_qa(llm: BaseChatModel, retriever: BaseRetriever, lang: str, voice: str, 
 
 def tab_tickets():
     st.subheader("🎫 Tickets")
+    # Access vector store for indexing answers
+    vectordb_local = st.session_state.get("vectordb")
     col_export, _ = st.columns([1,3])
     with col_export:
         if st.button("⬇️ Export JSON"):
@@ -854,6 +875,40 @@ def tab_tickets():
                 if st.button("Save", key=f"save_{t['id']}"):
                     update_ticket_status(t["id"], new_status)
                     st.success("Status updated.")
+                # Answer editor and indexing
+                answer_text = st.text_area("Answer", value=t.get("answer", ""), key=f"answer_{t['id']}")
+                if st.button("Save Answer", key=f"save_answer_{t['id']}"):
+                    if update_ticket_answer(t["id"], answer_text):
+                        # Index into Pinecone if available
+                        try:
+                            if vectordb_local:
+                                content = (
+                                    f"Title: {t['title']}\n\n"
+                                    f"Question:\n{t['description']}\n\n"
+                                    f"Answer:\n{answer_text}"
+                                )
+                                metadata = {
+                                    "source": "support_tickets",
+                                    "type": "support_qna",
+                                    "ticket_id": t["id"],
+                                    "ticket_title": t["title"],
+                                    "status": "closed",
+                                }
+                                # Upsert with stable ID to avoid duplicates on re-index
+                                vectordb_local.add_documents(
+                                    [Document(page_content=content, metadata=metadata)],
+                                    ids=[f"support_qna:{t['id']}"]
+                                )
+                                st.success("Answer saved and indexed to Pinecone.")
+                            else:
+                                st.success("Answer saved. Pinecone not configured, skipping indexing.")
+                        except Exception as e:
+                            st.warning(f"Answer saved, but failed to index: {e}")
+                    else:
+                        st.error("Failed to save answer.")
+                    # Reflect updated status immediately
+                    # if st.session_state.get("dialog_choose") is None:
+                    st.rerun()
     else:
         st.info("Empty ticket list.")
     
