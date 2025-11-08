@@ -256,6 +256,8 @@ def add_ticket(title: str, description: str, priority: str = "medium") -> Dict[s
         "description": description.strip(),
         "priority": priority,
         "status": "open",
+        "answer": "",
+        "answered_at": None,
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
     tickets.append(ticket)
@@ -269,6 +271,23 @@ def update_ticket_status(ticket_id: str, status: str):
             t["status"] = status
             break
     save_tickets(tickets)
+    
+def update_ticket_answer(ticket_id: str, answer: str) -> bool:
+    tickets = load_tickets()
+    updated = False
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    for t in tickets:
+        if t["id"] == ticket_id:
+            t["answer"] = (answer or "").strip()
+            t["answered_at"] = now_iso if t["answer"] else None
+            # Auto-progress status if answer provided
+            if t.get("answer") and t.get("status") in {"open", "in_progress", "done"}:
+                t["status"] = "closed"
+            updated = True
+            break
+    if updated:
+        save_tickets(tickets)
+    return updated
     
 # -------------------------
 # Prompt builders
@@ -644,12 +663,14 @@ def sidebar_config():
     
     return lang, style, top_k, voice, pinecone_api_key, pinecone_index_name, update_btn
 
+
 def tab_documents(vectordb: PineconeVectorStore):
     st.subheader("🗂️ Documents")
-    col_up, col_clear = st.columns([3,1])
-    
+    col_up, col_clear = st.columns([3, 1])
+
     with col_up:
-        uploaded = st.file_uploader("Upload (multiple files supported)", type=["txt","md","docx","doc","pdf"], accept_multiple_files=True)
+        uploaded = st.file_uploader("Upload (multiple files supported)", type=["txt", "md", "docx", "doc", "pdf"],
+                                    accept_multiple_files=True)
     with col_clear:
         if st.button("🧹 Clear Index"):
             # remove pinecone index
@@ -657,6 +678,11 @@ def tab_documents(vectordb: PineconeVectorStore):
             if st.session_state.get("dialog_choose", True):
                 vectordb.delete(delete_all=True)
                 st.success("Pinecone index removed.")
+
+            path = "./logs/uploaded_files.json"
+            if os.path.exists(path):
+                os.remove(path)
+
     splitter = get_text_splitter(mode="character_text_splitter")
     if uploaded:
         if st.button("⬇️ Import and Index Documents"):
@@ -666,17 +692,56 @@ def tab_documents(vectordb: PineconeVectorStore):
                     with open(path, "wb") as f:
                         f.write(file.read())
                     try:
+                        file_already_exists = False
+                        old_chunk_count = 0
+                        if os.path.exists("./logs/uploaded_files.json"):
+                            with open("./logs/uploaded_files.json", "r", encoding="utf-8") as f:
+                                history = json.load(f)
+                            for rec in history:
+                                if rec.get("file_name") == file.name:
+                                    file_already_exists = True
+                                    old_chunk_count = rec.get("chunk_count", 0)
+                                    old_source = rec.get("source")
+                                    if file.name.lower().endswith('.pdf'):
+                                        old_source = rec.get("file_path")
+
+                                    break
+
+                                    # Load + split
+                        docs = load_documents(path, file.name)
+                        chunks = splitter.split_documents(docs)
+
+                        if file_already_exists:
+                            st.warning(
+                                f"ĐÃ PHÁT HIỆN file cũ: **{file.name}** ({old_chunk_count} chunks) → Đang thay thế...")
+
+                            # XÓA CHUNK CŨ TRONG PINECONE
+                            vectordb.index.delete(
+                                filter={"source": {"$eq": old_source}}
+                            )
+
+                            # CẬP NHẬT LOG: xóa bản cũ
+                            history = [r for r in history if r.get("file_name") != file.name]
+                            with open("./logs/uploaded_files.json", "w", encoding="utf-8") as f:
+                                json.dump(history, f, ensure_ascii=False, indent=2)
+
                         docs = load_documents(path, file.name)
                         chunks = splitter.split_documents(docs)
                         if chunks:
                             print(f"Indexing {len(chunks)} chunks from {file.name}")
                             vectordb.add_documents(chunks)
+                            save_uploaded_file_metadata(
+                                file_name=file.name,
+                                file_path=path,
+                                chunk_count=len(chunks)
+                            )
                         st.success(f"Indexed: {file.name} ({len(chunks)} chunks)")
                     except Exception as e:
                         # print stack trace
                         traceback.print_exc()
                         st.error(f"Exception processing {file.name}: {e}")
-    
+                # st.rerun()
+
     # Display index statistics
     try:
         if vectordb and vectordb.index:
@@ -690,8 +755,143 @@ def tab_documents(vectordb: PineconeVectorStore):
     except Exception as e:
         traceback.print_exc()
         st.warning(f"⚠️ Could not retrieve index stats: {str(e)}")
-    
+
+    # ====================== LỊCH SỬ UPLOAD + XÓA THEO FILE ======================
+    st.markdown("---")
+    st.subheader("Upload File History:")
+
+    log_json_path = "./logs/uploaded_files.json"
+    if not os.path.exists(log_json_path):
+        st.warning("No JSON file.")
+        return vectordb
+
+    try:
+        with open(log_json_path, "r", encoding="utf-8") as f:
+            upload_history = json.load(f)
+
+        if not upload_history:
+            st.info("No files")
+            return vectordb
+
+        # Sắp xếp mới nhất lên đầu
+        upload_history.sort(key=lambda x: x["timestamp"], reverse=True)
+
+        for idx, record in enumerate(upload_history):
+            file_name = record.get("file_name", "unknown")
+            source_path = record.get("file_path", "")
+            source_name = record.get("source", os.path.basename(source_path))
+            chunk_count = record.get("chunk_count", 0)
+            timestamp = record.get("timestamp", "")[:19].replace("T", " ")
+
+            col1, col2, col3, col4, col5 = st.columns([3, 4, 1.5, 1.5, 1])
+
+            with col1:
+                st.write(f"**{file_name}**")
+            with col2:
+                st.caption(source_name)
+            with col3:
+                st.caption(f"**{chunk_count}** chunks")
+            with col4:
+                st.caption(timestamp)
+            with col5:
+                delete_key = f"delete_file_{idx}_{file_name}"
+                if st.button("DELETE", key=delete_key, type="secondary",
+                             help=f"Delete all {chunk_count} chunk of this file"):
+                    st.session_state[f"confirm_delete_file_{idx}"] = {
+                        "file_name": file_name,
+                        "source": source_name,
+                        "chunk_count": chunk_count,
+                        "source_path": source_path
+                    }
+                    st.rerun()
+
+        # === DIALOG XÁC NHẬN XÓA ===
+        for idx in range(len(upload_history)):
+            confirm_key = f"confirm_delete_file_{idx}"
+            if confirm_key in st.session_state:
+                info = st.session_state[confirm_key]
+
+                @st.dialog(f"Delete all chunks of file?")
+                def confirm_delete_file():
+                    st.error(f"You will delete **{info['chunk_count']} chunk** of file")
+                    st.code(info['file_name'], language="text")
+                    st.caption(f"Source: {info['source']}")
+
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if st.button("YES", type="primary"):
+                            try:
+                                # XÓA TRONG PINECONE THEO METADATA 'source'
+                                path = "./.tmp/" + info['file_name']
+                                print(info['file_name'])
+                                print(f"source_path: {path}")
+                                if file_name.lower().endswith('.txt'):
+                                    delete_result = vectordb.index.delete(
+                                        filter={"source": {"$eq": info['file_name']}}
+                                    )
+                                elif file_name.lower().endswith('.pdf'):
+                                    delete_result = vectordb.index.delete(
+                                        filter={"source": {"$eq": info['source_path']}}
+                                    )
+                                deleted_count = delete_result.get('deleted_count', 0)
+                                print(f"deleted_count: {deleted_count}")
+
+                                # XÓA KHỎI LOG JSON
+                                remaining = [r for r in upload_history if r.get("source") != info['source']]
+                                with open(log_json_path, "w", encoding="utf-8") as f:
+                                    json.dump(remaining, f, ensure_ascii=False, indent=2)
+
+                                st.success(f"DELETED {deleted_count} chunk of **{info['file_name']}**")
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Lỗi khi xóa: {e}")
+                    with col_b:
+                        if st.button("No"):
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+
+                confirm_delete_file()
+                break  # chỉ hiện 1 dialog
+
+        # Thống kê tổng
+        total_files = len(upload_history)
+        total_chunks = sum(r.get("chunk_count", 0) for r in upload_history)
+        st.markdown(f"---\n**Sum:** `{total_files}` file • `{total_chunks}` chunks")
+
+    except Exception as e:
+        st.error(f"Lỗi đọc log: {e}")
+        st.code(traceback.format_exc())
+
     return vectordb
+
+def save_uploaded_file_metadata(file_name: str, file_path: str, chunk_count: int):
+    """Lưu thông tin file đã upload vào file local"""
+    import csv
+    from datetime import datetime
+
+    record = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "file_name": file_name,
+        "file_path": file_path,
+        "source": os.path.basename(file_path),
+        "chunk_count": chunk_count,
+        "user_id": st.session_state.user_id,
+    }
+
+    json_file = "./logs/uploaded_files.json"
+    try:
+        if os.path.exists(json_file):
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = []
+    except:
+        data = []
+
+    data.append(record)
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def tab_summary(llm: BaseChatModel, vectordb: PineconeVectorStore, lang: str, style: str, voice: str):
     st.subheader("✂️ Summarize")
@@ -861,6 +1061,8 @@ def tab_qa(llm: BaseChatModel, retriever: BaseRetriever, lang: str, voice: str, 
 
 def tab_tickets():
     st.subheader("🎫 Tickets")
+    # Access vector store for indexing answers
+    vectordb_local = st.session_state.get("vectordb")
     col_export, _ = st.columns([1,3])
     with col_export:
         if st.button("⬇️ Export JSON"):
@@ -881,6 +1083,40 @@ def tab_tickets():
                 if st.button("Save", key=f"save_{t['id']}"):
                     update_ticket_status(t["id"], new_status)
                     st.success("Status updated.")
+                # Answer editor and indexing
+                answer_text = st.text_area("Answer", value=t.get("answer", ""), key=f"answer_{t['id']}")
+                if st.button("Save Answer", key=f"save_answer_{t['id']}"):
+                    if update_ticket_answer(t["id"], answer_text):
+                        # Index into Pinecone if available
+                        try:
+                            if vectordb_local:
+                                content = (
+                                    f"Title: {t['title']}\n\n"
+                                    f"Question:\n{t['description']}\n\n"
+                                    f"Answer:\n{answer_text}"
+                                )
+                                metadata = {
+                                    "source": "support_tickets",
+                                    "type": "support_qna",
+                                    "ticket_id": t["id"],
+                                    "ticket_title": t["title"],
+                                    "status": "closed",
+                                }
+                                # Upsert with stable ID to avoid duplicates on re-index
+                                vectordb_local.add_documents(
+                                    [Document(page_content=content, metadata=metadata)],
+                                    ids=[f"support_qna:{t['id']}"]
+                                )
+                                st.success("Answer saved and indexed to Pinecone.")
+                            else:
+                                st.success("Answer saved. Pinecone not configured, skipping indexing.")
+                        except Exception as e:
+                            st.warning(f"Answer saved, but failed to index: {e}")
+                    else:
+                        st.error("Failed to save answer.")
+                    # Reflect updated status immediately
+                    # if st.session_state.get("dialog_choose") is None:
+                    st.rerun()
     else:
         st.info("Empty ticket list.")
     
