@@ -524,18 +524,28 @@ def get_text_splitter(mode: str) -> TextSplitter:
 # -------------------------
 def tts_synthesize(text: str, voice: str = "alloy") -> bytes:
     if _OpenAI is None:
+        print("TTS Error: OpenAI library not available")
         return b""
+    
+    # Check if we have OpenAI API key for TTS
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        print("TTS Error: OPENAI_API_KEY not set. Azure OpenAI doesn't support TTS endpoint. You need a standard OpenAI API key.")
+        return b""
+    
     try:
-        client = _OpenAI()
+        client = _OpenAI(api_key=openai_key)
         resp = client.audio.speech.create(
-            model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
+            model=os.getenv("OPENAI_TTS_MODEL", "tts-1"),
             voice=voice,
             input=text,
-            format="mp3",
         )
         audio_bytes = resp if isinstance(resp, (bytes, bytearray)) else resp.read()
         return audio_bytes
-    except Exception:
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        import traceback
+        traceback.print_exc()
         return b""
     
 # ---------------------------
@@ -685,7 +695,13 @@ def tab_documents(vectordb: PineconeVectorStore):
 
 def tab_summary(llm: BaseChatModel, vectordb: PineconeVectorStore, lang: str, style: str, voice: str):
     st.subheader("✂️ Summarize")
-    content = ""
+    
+    # Initialize session state for summary
+    if "summary_output" not in st.session_state:
+        st.session_state.summary_output = None
+    if "summary_content" not in st.session_state:
+        st.session_state.summary_content = None
+    
     retriever = vectordb.as_retriever(search_kwargs={"k": 5})
     if st.button("Generate Summary"):
         guideline = build_summarize_user_guide("llm", style, lang)
@@ -694,16 +710,27 @@ def tab_summary(llm: BaseChatModel, vectordb: PineconeVectorStore, lang: str, st
         chain = build_summarizer(llm)
         with st.spinner("Summarizing..."):
             out = chain.invoke({"content": content, "system_prompt": guideline})
-        st.markdown(out)
+        st.session_state.summary_output = out
+        st.session_state.summary_content = content
         log_query("summary", content, out, {"lang": lang, "style": style})
+    
+    # Display summary if it exists
+    if st.session_state.summary_output:
+        st.markdown(st.session_state.summary_output)
         with st.expander("🔍 Reasoning / Context (prompt vars)"):
-            st.code(json.dumps({"style": style, "lang": lang, "content_sample": content[:600]}, ensure_ascii=False, indent=2))
-        if st.toggle("🔊 Đọc to (TTS)", value=False):
-            audio = tts_synthesize(out, voice=voice)
-            if audio:
-                st.audio(audio, format="audio/mp3")
-            else:
-                st.info("TTS không khả dụng hoặc lỗi cấu hình.")
+            st.code(json.dumps({"style": style, "lang": lang, "content_sample": st.session_state.summary_content[:600] if st.session_state.summary_content else ""}, ensure_ascii=False, indent=2))
+
+        if st.toggle("🔊 Đọc to (TTS)", value=False, key="summary_tts_toggle"):
+            with st.spinner("Generating audio..."):
+                # Use local TTS model (same as Q&A tab)
+                audio_data, sample_rate = speak(st.session_state.summary_output, lang=lang)
+                if audio_data is not None and len(audio_data) > 0:
+                    print('🔊🔊🔊🔊🔊 Audio generated successfully')
+                    create_audio_player(audio_data, sample_rate, autoplay=True)
+                    st.success("✅ Audio generated!")
+                else:
+                    print("❌ TTS not available or configuration error.")
+                    st.error("TTS not available or configuration error. Check terminal logs.")
 
 def tab_qa(llm: BaseChatModel, retriever: BaseRetriever, lang: str, voice: str, top_k: int):
     st.subheader("❓ RAG - Q&A")
