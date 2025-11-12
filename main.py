@@ -522,27 +522,27 @@ def display_assistant_response(answer, reasoning=None, tool_call=None, language=
                 # show tool_call in an expander (toggle controlled by session state)
                 with st.expander("Show tool_call", expanded=False):
                     st.code(tool_call)
-        # with col2:
-        #     key=f"tts_{hash(answer)}"
-        #     if key not in st.session_state.tts_playing:
-        #         st.session_state.tts_playing[key] = False
-        #     tts_btn = st.button("🔊", key=key)
-        #     if not st.session_state.tts_playing[key]:
-        #         if tts_btn:
-        #             st.session_state.tts_playing[key] = True
-        #             st.session_state.tts_last_clicked = key
-        #             st.rerun()  # ensure immediate refresh to show player
-        #     else:
-        #         with st.spinner(""):
-        #             audio_data, sr = speak(answer, lang=language)
-        #         create_audio_player(audio_data, sr, autoplay=True)
-        #         st.session_state.tts_last_clicked = None
-        #         st.session_state.tts_playing[key] = False
+        with col2:
+            key=f"tts_{hash(answer)}"
+            if key not in st.session_state.tts_playing:
+                st.session_state.tts_playing[key] = False
+            tts_btn = st.button("🔊", key=key)
+            if not st.session_state.tts_playing[key]:
+                if tts_btn:
+                    st.session_state.tts_playing[key] = True
+                    st.session_state.tts_last_clicked = key
+                    st.rerun()  # ensure immediate refresh to show player
+            else:
+                with st.spinner(""):
+                    audio_data, sr = speak(answer, lang=language)
+                create_audio_player(audio_data, sr, autoplay=True)
+                st.session_state.tts_last_clicked = None
+                st.session_state.tts_playing[key] = False
 
-        #     if tts_btn:
-        #         with st.spinner(""):
-        #             audio_data, sample_rate = speak(answer, lang='eng')
-        #             create_audio_player(audio_data, sample_rate)
+            if tts_btn:
+                with st.spinner(""):
+                    audio_data, sample_rate = speak(answer, lang='eng')
+                    create_audio_player(audio_data, sample_rate)
 
 # -------------------------
 # Chains
