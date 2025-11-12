@@ -6,7 +6,9 @@ import time
 import traceback
 from datetime import datetime
 import tiktoken
-from typing import List, Dict, Any, Literal
+from typing import List, Dict, Any, Literal, TypedDict
+import re
+import ast
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -20,7 +22,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_text_splitters.base import TextSplitter
 
 # Pinecone client for index management
@@ -36,7 +38,7 @@ from langchain_pinecone import PineconeVectorStore
 from langchain.tools import tool
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
-
+from langgraph.graph import StateGraph, START, END, MessagesState
 
 # from langchain.chains import RetrievalQA
 
@@ -90,8 +92,11 @@ if "tts_last_clicked" not in st.session_state:
     st.session_state.tts_last_clicked = None
 if "first_load" not in st.session_state:
     st.session_state.first_load = True
+if 'button_state' not in st.session_state:
+    st.session_state.button_state = -1
 if 'user_id' not in st.session_state:
     st.session_state.user_id = str(uuid.uuid4())
+
 
 def log_query(qtype: str, input_text: str, output_text: str, meta: Dict[str, Any] = None):
     row = {
@@ -241,6 +246,10 @@ def load_tickets() -> List[Dict[str, Any]]:
             return json.load(f)
     except Exception:
         return []
+    
+def remove_all_tickets():
+    if os.path.exists(TICKETS_FILE):
+        os.remove(TICKETS_FILE)
 
 def save_tickets(tickets: List[Dict[str, Any]]):
     with open(TICKETS_FILE, "w", encoding="utf-8") as f:
@@ -320,11 +329,10 @@ def build_qna_prompt(question: str, context: str, language: Languages = 'eng') -
     language_instruction = f"Please response in {LANGUAGE_MAP.get(language, 'eng')}." if language != "eng" else ""
 
     # System prompt with Chain of Thought reasoning (from merege-code.py)
-    system_prompt = f"""You have access to a tool that retrieves context from User Guide documentation.
-Use the tool to help answer user queries.{language_instruction}
+    system_prompt = f"""You have access to a tool `retrieve_context` that retrieves context from User Guide documentation. Use the tool to help answer user queries.{language_instruction}
 Follow these steps for every answer:
 1. Always use the tool to retrieve the context based on the user question. Use the results from the tool to reason about the best possible answer.
-2. Do not make up answers, only use the retrieved context.
+2. **Do not make up answers**, only use the retrieved context.
 3. If you you cannot answer, or the information is not found, ask if user wants to contact support, and also ask their name and email if unknown, **do not make up an example user and email, ask user to provide if missing**.
 4. If the user wants to contact support, ask for their name and email if unknown, then use the `create_ticket` function to create a support ticket.
 """
@@ -438,6 +446,68 @@ Answer:"""
 
     return system_prompt, messages
 
+def stream_answer(agent, question):
+    history = st.session_state.chat_history
+    stream = agent.stream(
+        {"messages": [*history, {"role": "user", "content": question}]},
+        # {"configurable": {"thread_id": st.session_state.get("session_id", "1")}}
+    )
+    
+    answer = None
+    reasoning = None
+    tool_call = None
+    language = 'eng'
+    with st.chat_message("assistant"):
+        col1, col2 = st.columns([0.9, 0.1])
+        
+        with col1:
+            with st.spinner("🤔 Thinking..."):
+                # st.write_stream(stream)
+                for message in stream:
+                    if 'tool_node' in message:
+                        print("Tool call detected")
+                        # print(message['tools'])
+                        tool_msg = message['tool_node']['messages'][0]
+                        matches = re.findall(r"Source:\s*(\{.*?\})(?:\s*Content:|$)", tool_msg.content, re.DOTALL)
+                        # sources = [ast.literal_eval(m) for m in matches]
+                        if len(matches) == 0:
+                            matches = [tool_msg.content]
+
+                        tool_call = "Tool output:\n" + '\n'.join(matches)
+                        with st.expander("Show tool_call", expanded=False):
+                            # tool_call
+                            st.code(tool_call)
+                    if 'llm_call' in message:
+                        answer = message['llm_call']['messages'][-1].content
+                        st.markdown(answer)
+                    if 'final_synthesizer' in message:
+                        print("Final synthesizer step")
+                        st.markdown(message['final_synthesizer'])
+
+            st.session_state.chat_history.append({"role": "assistant", "content": answer, "reasoning": reasoning, "tool_call": tool_call, "language": language})
+        
+        with col2:
+            if answer:
+                key=f"tts_{hash(answer)}"
+                if key not in st.session_state.tts_playing:
+                    st.session_state.tts_playing[key] = False
+                tts_btn = st.button("🔊", key=key)
+                if not st.session_state.tts_playing[key]:
+                    if tts_btn:
+                        st.session_state.tts_playing[key] = True
+                        st.session_state.tts_last_clicked = key
+                        st.rerun()  # ensure immediate refresh to show player
+                else:
+                    with st.spinner(""):
+                        audio_data, sr = speak(answer, lang=language)
+                    create_audio_player(audio_data, sr, autoplay=True)
+                    st.session_state.tts_last_clicked = None
+                    st.session_state.tts_playing[key] = False
+
+                if tts_btn:
+                    with st.spinner(""):
+                        audio_data, sample_rate = speak(answer, lang='eng')
+                        create_audio_player(audio_data, sample_rate)
 
 def display_assistant_response(answer, reasoning=None, tool_call=None, language='eng'):
     with st.chat_message("assistant"):
@@ -452,27 +522,27 @@ def display_assistant_response(answer, reasoning=None, tool_call=None, language=
                 # show tool_call in an expander (toggle controlled by session state)
                 with st.expander("Show tool_call", expanded=False):
                     st.code(tool_call)
-        with col2:
-            key=f"tts_{hash(answer)}"
-            if key not in st.session_state.tts_playing:
-                st.session_state.tts_playing[key] = False
-            tts_btn = st.button("🔊", key=key)
-            if not st.session_state.tts_playing[key]:
-                if tts_btn:
-                    st.session_state.tts_playing[key] = True
-                    st.session_state.tts_last_clicked = key
-                    st.rerun()  # ensure immediate refresh to show player
-            else:
-                with st.spinner(""):
-                    audio_data, sr = speak(answer, lang=language)
-                create_audio_player(audio_data, sr, autoplay=True)
-                st.session_state.tts_last_clicked = None
-                st.session_state.tts_playing[key] = False
+        # with col2:
+        #     key=f"tts_{hash(answer)}"
+        #     if key not in st.session_state.tts_playing:
+        #         st.session_state.tts_playing[key] = False
+        #     tts_btn = st.button("🔊", key=key)
+        #     if not st.session_state.tts_playing[key]:
+        #         if tts_btn:
+        #             st.session_state.tts_playing[key] = True
+        #             st.session_state.tts_last_clicked = key
+        #             st.rerun()  # ensure immediate refresh to show player
+        #     else:
+        #         with st.spinner(""):
+        #             audio_data, sr = speak(answer, lang=language)
+        #         create_audio_player(audio_data, sr, autoplay=True)
+        #         st.session_state.tts_last_clicked = None
+        #         st.session_state.tts_playing[key] = False
 
-            if tts_btn:
-                with st.spinner(""):
-                    audio_data, sample_rate = speak(answer, lang='eng')
-                    create_audio_player(audio_data, sample_rate)
+        #     if tts_btn:
+        #         with st.spinner(""):
+        #             audio_data, sample_rate = speak(answer, lang='eng')
+        #             create_audio_player(audio_data, sample_rate)
 
 # -------------------------
 # Chains
@@ -491,19 +561,94 @@ tools = [retrieve_context, add_ticket]
 
 class ReasoningAnswer(BaseModel):
     """An answer with details of language and the tool call made."""
-    answer: str = Field(..., description="The pretty markdown format of the answer")
-    reasoning: str = Field(..., description="The reasoning or tool call leading to the answer")
-    language: str = Field(..., description="The language of the answer, only 'vie', 'eng', 'kor', 'fra', or 'deu'")
+    answer: str = Field(None, description="The pretty markdown format of the answer")
+    reasoning: str = Field(None, description="The reasoning or tool call leading to the answer")
+    language: str = Field(None, description="The language of the answer, only 'vie', 'eng', 'kor', 'fra', or 'deu'")
+
+
+system_prompt, few_shot = build_qna_prompt(question='', language='eng', context='')
+# llm = llm.with_structured_output(ReasoningAnswer)
+# Build workflow
+tools_by_name = {tool.name: tool for tool in tools}
+
+llm_with_tools = None
+    
+# Nodes
+def llm_call(state: MessagesState):
+    """LLM decides whether to call a tool or not"""
+    llm_with_tools = llm.bind_tools(tools)
+    return {
+        "messages": [
+            llm_with_tools.invoke(
+                [
+                    SystemMessage(
+                        content=system_prompt
+                    )
+                ]
+                + state["messages"]
+            )
+        ]
+    }
+
+def final_synthesizer(state: MessagesState):
+    """Synthesize final answer after tool calls"""
+    structured_llm = llm.with_structured_output(ReasoningAnswer)
+    msg = structured_llm.invoke(state["messages"])
+    print("Final synthesized answer:", msg)
+    return msg
+    
+def tool_node(state: dict):
+    """Performs the tool call"""
+
+    result = []
+    for tool_call in state["messages"][-1].tool_calls:
+        tool = tools_by_name[tool_call["name"]]
+        observation = tool.invoke(tool_call["args"])
+        result.append(ToolMessage(content=observation, tool_call_id=tool_call["id"]))
+    return {"messages": result}
+
+# Conditional edge function to route to the tool node or end based upon whether the LLM made a tool call
+def should_continue(state: MessagesState) -> Literal["tool_node", END]:
+    """Decide if we should continue the loop or stop based upon whether the LLM made a tool call"""
+
+    messages = state["messages"]
+    last_message = messages[-1]
+
+    # If the LLM makes a tool call, then perform an action
+    if last_message.tool_calls:
+        return "tool_node"
+
+    # Otherwise, we stop (reply to the user)
+    return END
 
 def build_rag(retriever, llm: BaseChatModel):
-    system_prompt, few_shot = build_qna_prompt(question='', language='eng', context='')
-    # llm = llm.with_structured_output(ReasoningAnswer)
-    agent = create_agent(
-        llm, 
-        tools, 
-        system_prompt=system_prompt,
-        response_format=ToolStrategy(ReasoningAnswer),
+    
+    # Build workflow
+    agent_builder = StateGraph(MessagesState)
+
+    # Add nodes
+    agent_builder.add_node("llm_call", llm_call)
+    agent_builder.add_node("tool_node", tool_node)
+    # agent_builder.add_node('final_synthesizer', final_synthesizer)
+
+    # Add edges to connect nodes
+    agent_builder.add_edge(START, "llm_call")
+    agent_builder.add_conditional_edges(
+        "llm_call",
+        should_continue,
+        ["tool_node", END]
     )
+    agent_builder.add_edge("tool_node", "llm_call")
+    # agent_builder.add_edge('final_synthesizer', END)
+
+    # Compile the agent
+    agent = agent_builder.compile()
+    # agent = create_agent(
+    #     llm, 
+    #     tools, 
+    #     system_prompt=system_prompt,
+    #     response_format=ToolStrategy(ReasoningAnswer),
+    # )
     # chain = (
     #     {
     #         "context": retriever | (lambda docs: join_docs(docs)),
@@ -585,33 +730,6 @@ st.markdown(
         }}
     </style>
     ''',unsafe_allow_html=True)
-
-# Define available functions for OpenAI
-function_definitions = [{
-    "type": "function",
-    "function": {
-        "name": "create_support_ticket",
-        "description": "Submit a support ticket for further assistance if user provided question cannot be answered, when the user provides enough contact details including name and email",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "The customer's full name"
-                },
-                "email": {
-                    "type": "string",
-                    "description": "The customer's email address"
-                },
-                "issue_description": {
-                    "type": "string",
-                    "description": "The question or issue the person is experiencing, getting from the 'Conversation history' where the question you cannot answered, or the current user requested support question"
-                }
-            },
-            "required": ["name", "email", "issue_description"]
-        }
-    }
-}]
 
 
 # -------------------------
@@ -932,7 +1050,7 @@ def tab_summary(llm: BaseChatModel, vectordb: PineconeVectorStore, lang: str, st
                     print("❌ TTS not available or configuration error.")
                     st.error("TTS not available or configuration error. Check terminal logs.")
 
-def tab_qa(llm: BaseChatModel, retriever: BaseRetriever, lang: str, voice: str, top_k: int):
+def tab_qa(llm: BaseChatModel, retriever: BaseRetriever, lang: str, voice: str, top_k: int, agent):
     st.subheader("❓ RAG - Q&A")
     # Chat interface
     st.info("💡 **Smart Language Detection**: Ask questions in any supported language, and I'll respond in the same language! The configured language above is used for summaries only.")
@@ -960,6 +1078,7 @@ def tab_qa(llm: BaseChatModel, retriever: BaseRetriever, lang: str, voice: str, 
                 st.markdown("### 💡 Suggested Questions (Multi-Language)")
                 suggested_questions = [
                     "What are the main contents described in this guide?",
+                    "how to build a spacecraft?",
                     "Nội dung chính của tài liệu này là gì?",
                     "이 가이드에 설명된 주요 내용은 무엇입니까?",
                     "Quels sont les principaux contenus décrits dans ce guide?",
@@ -970,36 +1089,14 @@ def tab_qa(llm: BaseChatModel, retriever: BaseRetriever, lang: str, voice: str, 
                 for i, suggestion in enumerate(suggested_questions):
                     with cols[i % 2]:
                         if st.button(f"💭 {suggestion}", key=f"suggestion_{i}"):
-                            # Set the question and trigger ask
-                            # with st.spinner("Querying..."):
-                            #     response = agent.invoke({"messages": [{"role": "user", "content": question}]})
-                            #     answer = response["messages"][-1].content
-                            #     print(response)
-                            # st.markdown(answer)
-                            # st.session_state.chat_history.add_user_message(question)
-                            # st.session_state.chat_history.add_ai_message(answer)
-                            st.session_state.chat_history.append({"role": "user", "content": suggestion})
-                            with st.chat_message("user"):
-                                st.markdown(suggestion)
-                            with st.spinner("🤔 Thinking..."):
-                                agent, few_shot = build_rag(retriever, llm)
-                                history = st.session_state.chat_history 
-                                # Use auto-detection for suggested questions too
-                                response = agent.invoke({"messages": [*history, {"role": "user", "content": suggestion}]})
-                                structured = response["structured_response"]
-                                print(structured)
-                                print("="*80)
-                                print(response["messages"][-2])
-                                print("="*80)
-                                print(response["messages"][-3])
-                                print("="*80)
-                                answer = structured.answer
-                                reasoning = structured.reasoning
-                                language= structured.language
-                                tool_call = response["messages"][-3].content
-                                display_assistant_response(answer, reasoning, tool_call, language)
-                                st.session_state.chat_history.append({"role": "assistant", "content": answer, "reasoning": reasoning, "tool_call": tool_call, "language": language})
-                                st.rerun()
+                            st.session_state.button_state = i
+
+                if st.session_state.button_state != -1:
+                    suggestion = suggested_questions[st.session_state.button_state]
+                    st.session_state.chat_history.append({"role": "user", "content": suggestion})
+                    with st.chat_message("user"):
+                        st.markdown(suggestion)
+                    stream_answer(agent, suggestion)
 
     # Process question
     question = st.chat_input("e.g., How do I configure this feature? | ¿Cómo configuro esta característica? | Comment configurer cette fonctionnalité?")
@@ -1009,27 +1106,7 @@ def tab_qa(llm: BaseChatModel, retriever: BaseRetriever, lang: str, voice: str, 
         with chat_container:
             with st.chat_message("user"):
                 st.markdown(question)
-            with st.spinner("🤔 Thinking..."):
-                # Use auto-detection for chatbot, but keep manual language for summaries
-                agent, few_shot = build_rag(retriever, llm)
-                history = st.session_state.chat_history 
-                # Use auto-detection for suggested questions too
-                response = agent.invoke({"messages": [*history, {"role": "user", "content": question}]})
-                structured = response["structured_response"]
-                print(structured)
-                print("="*80)
-                print(response["messages"][-2])
-                print("="*80)
-                print(response["messages"][-3])
-                print("="*80)
-                answer = structured.answer
-                reasoning = structured.reasoning
-                language= structured.language
-                tool_call = response["messages"][-3].content
-                display_assistant_response(answer, reasoning, tool_call, language)
-                st.session_state.chat_history.append({"role": "assistant", "content": answer, "reasoning": reasoning, "tool_call": tool_call, "language": language})
-            # Clear input and rerun to show new message
-            # st.rerun()
+            stream_answer(agent, question)
     
     # Chat controls
     col_clear, col_export = st.columns(2)
@@ -1063,19 +1140,25 @@ def tab_tickets():
     st.subheader("🎫 Tickets")
     # Access vector store for indexing answers
     vectordb_local = st.session_state.get("vectordb")
-    col_export, _ = st.columns([1,3])
+    col_export, col_remove = st.columns([1,3])
     with col_export:
         if st.button("⬇️ Export JSON"):
             tickets = load_tickets()
             b = io.BytesIO(json.dumps(tickets, ensure_ascii=False, indent=2).encode("utf-8"))
             st.download_button("Download tickets.json", b, file_name="tickets.json", mime="application/json")
 
+    with col_remove:
+        if st.button("🗑️ Remove All Tickets"):
+            remove_all_tickets()
+            st.success("All tickets removed.")
+            
     st.markdown("---")
     st.markdown("**Customer Support Requests:**")
     tickets = load_tickets()
+    
     if tickets:
         for t in sorted(tickets, key=lambda x: (x["status"] != "open", x["created_at"])):
-            with st.expander(f"[{t['status'].upper()}] {t['title']}  •  {t['priority']}  •  {t['id'][:8]}"):
+            with st.expander(f"[{t['status'].upper()}] {t['title']}  •  {t['id'][:8]}"):
                 st.write(t["description"])
                 st.caption(f"Created: {t['created_at']}")
                 new_status = st.selectbox("Update status", ["open","in_progress","done","closed"],
@@ -1092,7 +1175,6 @@ def tab_tickets():
                             if vectordb_local:
                                 content = (
                                     f"Title: {t['title']}\n\n"
-                                    f"Question:\n{t['description']}\n\n"
                                     f"Answer:\n{answer_text}"
                                 )
                                 metadata = {
@@ -1116,7 +1198,7 @@ def tab_tickets():
                         st.error("Failed to save answer.")
                     # Reflect updated status immediately
                     # if st.session_state.get("dialog_choose") is None:
-                    st.rerun()
+                    # st.rerun()
     else:
         st.info("Empty ticket list.")
     
@@ -1133,12 +1215,13 @@ vectordb = None
 global_top_k = 5
 
 def initialize_app(pinecone_api_key=None, pinecone_index_name=None):
-    global llm, embeddings, vectordb
+    global llm, embeddings, vectordb, llm_with_tools
     if st.session_state.first_load:
         print("Initializing models and components...")
         with st.spinner("🚀 Initializing models and components..."):
             llm = build_llm()
             embeddings = build_embeddings()
+            llm_with_tools = llm.bind_tools(tools)
             initialize_tts()
             # build_transformers()
             if not pinecone_api_key or not pinecone_index_name:
@@ -1149,10 +1232,18 @@ def initialize_app(pinecone_api_key=None, pinecone_index_name=None):
             st.session_state["llm"] = llm
             st.session_state["embeddings"] = embeddings
         st.session_state.first_load = False
+        retriever = vectordb.as_retriever(search_kwargs={"k": global_top_k}) if vectordb else None
+        agent, few_shot = build_rag(retriever, llm)
+        st.session_state["retriever"] = retriever
+        st.session_state["agent"] = agent
+        st.rerun()
     else:
         llm = st.session_state.get("llm")
         embeddings = st.session_state.get("embeddings")
         vectordb = st.session_state.get("vectordb")
+        retriever = vectordb.as_retriever(search_kwargs={"k": global_top_k}) if vectordb else None
+        st.session_state["retriever"] = retriever
+        agent = st.session_state.get("agent")
 
 def main():
     global global_top_k
@@ -1169,8 +1260,8 @@ def main():
 
     initialize_app()
     vectordb = st.session_state.get("vectordb")
-    retriever = vectordb.as_retriever(search_kwargs={"k": top_k}) if vectordb else None
-    st.session_state["retriever"] = retriever
+    agent = st.session_state.get("agent")
+    retriever = st.session_state.get("retriever")
 
     tabs = st.tabs(["📚 Document Indexing", "🔍 User Guide Summary", "💬 Q&A Chatbot", "🎫 Support Questions"])
     
@@ -1186,7 +1277,7 @@ def main():
         llm = st.session_state.get("llm")
         vectordb = st.session_state.get("vectordb")
         retriever = st.session_state.get("retriever")
-        tab_qa(llm, retriever, lang, voice, top_k)
+        tab_qa(llm, retriever, lang, voice, top_k, agent)
 
     with tabs[3]:
         tab_tickets()

@@ -4,3 +4,8 @@ node_modules/
 CLAUDE.md
 .chroma
 __pycache__
+
+logs
+.tmp
+
+.DS_Store
